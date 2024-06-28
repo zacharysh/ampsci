@@ -89,19 +89,20 @@ const std::vector<std::pair<std::string, std::string>> options{
      "    - Prints list of input options for the 'MatrixElements' module\n"},
     {"-o [OperatorName], --operators [OperatorName]",
      "Prints list of available operators (for calculating matrix elements). "
-     "OperatorName is optional; if given, will list avaiable options for that "
+     "OperatorName is optional; if given, will list available options for that "
      "operator (most operators take no options).\n"
      "Examples:\n"
      "./ampsci -o\n"
      "    - Prints list of available operators\n"
      "./ampsci -o E1\n"
-     "    - Prints list of input optins for the 'E1' operator\n"},
-    {"-p [Atom] [Isotope], --periodicTable [Atom] [Isotope]",
+     "    - Prints list of input options for the 'E1' operator\n"},
+    {"-p/P [Atom] [Isotope], --periodicTable [Atom] [Isotope]",
      "Prints textual periodic table with electronic + nuclear information. "
      "Atom and Isotope are optional; if given, will print info for that "
      "isotope. Atom should be atomic symbol (eg Cs), or Z (55). If Isotope is "
      "blank, will print for 'default' isotope. Can also list 'all' known "
-     "isotope info\n"
+     "isotope info. Flag -p will cause ampsci to return once printed, "
+     "and flags -P/--periodicTable will enter an interactive session\n"
      "Examples:\n"
      "./ampsci -p\n"
      "    - Prints a text periodic table\n"
@@ -112,7 +113,7 @@ const std::vector<std::pair<std::string, std::string>> options{
      "    - Prints a text periodic table, with atomic information for Cs-131\n"
      "./ampsci -p Cs all\n"
      "    - Prints a text periodic table, with atomic information for all "
-     "(available) Cs iotopes\n"},
+     "(available) Cs isotopes\n"},
     {"-v, --version", "Prints ampsci version (and git commit) details"}
     //
 };
@@ -215,10 +216,11 @@ int main(int argc, char *argv[]) {
     }
     ampsci(temp_input);
     return 0;
-  } else if (input_text == "-p" || input_text == "--periodicTable") {
+  } else if (input_text == "-p" || input_text == "-P" || input_text == "--periodicTable") {
     std::string z_str = (argc > 2) ? argv[2] : "";
     std::string a_str = (argc > 3) ? argv[3] : "";
-    AtomData::periodicTable(z_str, a_str);
+    auto keep_running = (input_text != "-p");
+    AtomData::periodicTable(z_str, a_str, keep_running);
     return 0;
   } else if (input_text == "-e" || input_text == "--EasterEgg") {
     std::cout << EasterEgg::get_egg();

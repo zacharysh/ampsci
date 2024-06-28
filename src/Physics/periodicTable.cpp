@@ -76,7 +76,7 @@ void printConstants() //
 }
 
 //==============================================================================
-void periodicTable(std::string z_str, std::string a_str) {
+void periodicTable(std::string z_str, std::string a_str, bool keep_running) {
   if (a_str == "")
     a_str = "0";
 
@@ -116,7 +116,7 @@ void periodicTable(std::string z_str, std::string a_str) {
       }
       std::cout << "\n";
 
-      std::cout << "\nIsotpe data:";
+      std::cout << "\nIsotope data:";
       if (isotopes.empty()) {
         std::cout << " none known\n";
       }
@@ -124,6 +124,10 @@ void periodicTable(std::string z_str, std::string a_str) {
         std::cout << "\n";
         printData(nuc);
       }
+    }
+
+    if(!keep_running) {
+      break;
     }
 
     std::cout << "\nEnter atom (and optional isotope):\n";
