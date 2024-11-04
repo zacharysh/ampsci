@@ -4,6 +4,7 @@
 #include "ExternalField/TDHF.hpp"
 #include "ExternalField/TDHFbasis.hpp"
 #include "IO/InputBlock.hpp"
+#include "MBPT/StructureRad.hpp"
 #include "Physics/PhysConst_constants.hpp"
 #include "Wavefunction/Wavefunction.hpp"
 #include "fmt/ostream.hpp"
@@ -20,10 +21,30 @@ namespace Module {
 void fieldShift(const IO::InputBlock &input, const Wavefunction &wf) {
   input.check({{"", "Calculates field shift using MBPT, including 2nd-order "
                     "(quadratic) field shift, via the TDHF/RPA(basis) method"},
-               {"RPA", "Include RPA? true/Ffalse [true]"},
+               {"RPA", "Include RPA? true/false [true]"},
                {"num_steps", "Number of steps to compute changes in <r^2> for; "
                              "should be even, >=2 [20]"},
-               {"dr", "Smallest change in rms charge radius (fm) [0.0001]"}});
+               {"dr", "Smallest change in rms charge radius (fm) [0.0001]"},
+               {"G2_SoS", "Calculate G2 using sum over states method (consistency check) [false]"},
+              {"StructureRadiation{}",
+                "Options for Structure Radiation and normalisation (details below)"}});
+
+  const auto t_SR_input = input.getBlock("StructureRadiation");
+  auto SR_input =
+      t_SR_input ? *t_SR_input : IO::InputBlock{"StructureRadiation"};
+  if (input.has_option("help")) {
+    SR_input.add("help;");
+  }
+  SR_input.check(
+      {{"", "If this block is included, SR + Normalisation "
+            "corrections will be included"},
+       {"Qk_file",
+        "true/false/filename - SR: filename for QkTable file. If blank will "
+        "not use QkTable; if exists, will read it in; if doesn't exist, will "
+        "create it and write to disk. If 'true' will use default filename. "
+        "Save time (10x) at cost of memory. Note: Using QkTable "
+        "implies splines used for diagram legs"},
+       {"n_minmax", "list; min,max n for core/excited: [1,inf]"}});
 
   // If we are just requesting 'help', don't run module:
   if (input.has_option("help")) {
@@ -37,6 +58,39 @@ void fieldShift(const IO::InputBlock &input, const Wavefunction &wf) {
   const auto num_steps_tmp = std::max(input.get("num_steps", 20ul), 2ul);
   const auto delta_r = input.get("dr", 0.0001);
   const auto rpaQ = input.get("RPA", true);
+  const auto G2_SoS = input.get("G2_SoS", false);
+
+  // For SR+N
+  std::optional<MBPT::StructureRad> sr;
+  if (t_SR_input) {
+    // min/max n (for core/excited basis)
+    const auto n_minmax = SR_input.get("n_minmax", std::vector{1});
+    const auto n_min = n_minmax.size() > 0 ? n_minmax[0] : 1;
+    const auto n_max = n_minmax.size() > 1 ? n_minmax[1] : 999;
+    const auto Qk_file_t = SR_input.get("Qk_file", std::string{"false"});
+    std::string Qk_file =
+        Qk_file_t != "false" ?
+            Qk_file_t == "true" ? wf.identity() + ".qk.abf" : Qk_file_t :
+            "";
+
+    std::cout
+        << "\nIncluding Structure radiation and normalisation of states:\n";
+    if (n_min > 1)
+      std::cout << "Including from n = " << n_min << "\n";
+    if (n_max < 999)
+      std::cout << "Including to n = " << n_max << "\n";
+    if (!Qk_file.empty()) {
+      std::cout
+          << "Will read/write Qk integrals to file: " << Qk_file
+          << "\n  -- Note: means spline/basis states used for spline legs\n";
+    } else {
+      std::cout << "Will calculate Qk integrals on-the-fly\n";
+    }
+    std::cout << std::flush;
+
+    sr = MBPT::StructureRad(wf.basis(), wf.FermiLevel(), {n_min, n_max},
+                            Qk_file);
+  }
 
   // Initial (reference) nuclear parameters:
   const auto &nuc0 = wf.nucleus();
@@ -47,7 +101,7 @@ void fieldShift(const IO::InputBlock &input, const Wavefunction &wf) {
   std::cout
       << "\nCalculating shift in valence state energies using.\n"
       << "dE^(1) = F d<r^2> + G^2 d<r^2>^2 + G^4 d<r^4>\n"
-      << "[nb: E is binding energy (different sign from someother works)]\n";
+      << "[nb: E is binding energy (different sign from some other works)]\n";
 
   // For second-order G^2 correction,
   // See, e.g., Eq.(8) PhysRevA.103.L030801 (2021)
@@ -127,8 +181,18 @@ void fieldShift(const IO::InputBlock &input, const Wavefunction &wf) {
       const auto k = fis.rme3js(Fv.twoj(), Fv.twoj()); // RME -> ME
 
       // First-order correction:
-      auto F_rme = fis.reducedME(Fv, Fv) + dVfis.dV(Fv, Fv);
-      const auto dE = F_rme * k * PhysConst::Hartree_GHz;
+      auto F_rme = fis.reducedME(Fv, Fv) + (rpaQ ? dVfis.dV(Fv, Fv) : 0.0);
+      auto dE = F_rme * k * PhysConst::Hartree_GHz;
+
+      if (sr) {
+        const auto [tb, dvtb] = sr->srTB(&fis, Fv, Fv, 0.0, &dVfis);
+        const auto [c, dvc] = sr->srC(&fis, Fv, Fv, &dVfis);
+        const auto [n, dvn] = sr->norm(&fis, Fv, Fv, &dVfis);
+        const auto sr0 = (tb + c + n);
+        const auto sr_rpa = rpaQ ? (dvtb + dvc + dvn) : sr0;
+        dE += sr_rpa * k * PhysConst::Hartree_GHz;
+      }
+
 
       fmt::print(" {:11.4e}", dE);
 
@@ -142,24 +206,29 @@ void fieldShift(const IO::InputBlock &input, const Wavefunction &wf) {
             fis.reduced_rhs(Fv.kappa(), Fv) + dVfis.dV_rhs(Fv.kappa(), Fv);
 
         const auto dFv1 = dVfis.solve_dPsi(Fv, 0.0, ExternalField::dPsiType::X,
-                                           Fv.kappa(), wf.Sigma());
-
-        // .. and using SOS method:
-        // If including correlations, should have a spectrum for MBPT
-        const auto &basis = wf.spectrum().empty() ? wf.basis() : wf.spectrum();
-        // Note: negative energy states are required here!!
-        const auto dFv2 =
-            ExternalField::solveMixedState_basis(Fv, hFv, 0.0, basis);
+                                            Fv.kappa(), wf.Sigma());
 
         const auto G2_rme = fis.reducedME(Fv, dFv1) + dVfis.dV(Fv, dFv1);
-        const auto G2_rme2 = fis.reducedME(Fv, dFv2) + dVfis.dV(Fv, dFv2);
         const auto dE2 = G2_rme * k * k * PhysConst::Hartree_GHz;
 
-        // Just ude TDHF for the fit: more stable
+        // Just use TDHF for the fit: more stable
         G2_data(j, i) = dE2;
+        fmt::print(gout, " {:11.4e}", dE2);
 
-        fmt::print(gout, " {:11.4e}", G2_rme);
-        fmt::print(gout2, " {:11.4e}", G2_rme2);
+        // .. and optionally using SOS method:
+        if(G2_SoS) {
+
+          // If including correlations, should have a spectrum for MBPT
+          const auto &basis = wf.spectrum().empty() ? wf.basis() : wf.spectrum();
+
+          // Note: negative energy states are required here!!
+          const auto dFv2 =
+              ExternalField::solveMixedState_basis(Fv, hFv, 0.0, basis);
+
+          const auto G2_rme2 = fis.reducedME(Fv, dFv2) + dVfis.dV(Fv, dFv2);
+
+          fmt::print(gout2, " {:11.4e}", G2_rme2 * k * k * PhysConst::Hartree_GHz);
+        } 
       }
     }
     if (dVfis.last_eps() > 1.0e-8)
@@ -184,19 +253,21 @@ void fieldShift(const IO::InputBlock &input, const Wavefunction &wf) {
     std::cout << std::endl;
     std::cout << gout.str();
 
-    std::cout << "\ndE(2) (GHz) - SOS method (as a check)\n"
-                 " * note: Requires large spectrum + negative energy states!\n";
-    fmt::print("{:6s} {:8s} {:8s}", "r_rms", " d<r2>", " d<r2>^2");
-    for (const auto &Fv : wf.valence()) {
-      fmt::print("  {:10s}", Fv.shortSymbol());
+    if(G2_SoS) {
+      std::cout << "\ndE(2) (GHz) - SOS method (as a check)\n"
+                  " * note: Requires large spectrum + negative energy states!\n";
+      fmt::print("{:6s} {:8s} {:8s}", "r_rms", " d<r2>", " d<r2>^2");
+      for (const auto &Fv : wf.valence()) {
+        fmt::print("  {:10s}", Fv.shortSymbol());
+      }
+      std::cout << std::endl;
+      std::cout << gout2.str();
     }
-    std::cout << std::endl;
-    std::cout << gout2.str();
   }
 
   //----------------------------------------------------------------------------
   // Perform fit to dE = F * d<r^2> to extract F
-  // AND, independantly for QFS
+  // AND, independently for QFS
   // fit to dE(2) = G2 * (d<r^2>)^2 to extract G2
   std::cout << "\n-------------------------------------\n";
   std::cout << "Fit two independent linear fits:\n"
